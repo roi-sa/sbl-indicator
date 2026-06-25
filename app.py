@@ -14,54 +14,51 @@ DATA_FILE = "sbl_history.json"
 
 def fetch_and_save_data():
     url = "https://www.saudiexchange.sa/Resources/Reports-v2/SBLReport_ar.html"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     
+    # تحميل التاريخ الحالي أولاً لمنع الكتابة فوق البيانات القديمة
+    history = {}
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        except Exception:
+            history = {}
+
     try:
-        # إضافة verify=False لتخطي مشكلة الـ SSL الشهيرة
-        response = requests.get(url, headers=headers, verify=False)
+        response = requests.get(url, headers=headers, verify=False, timeout=15)
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
         rows = soup.find_all('tr')
         total_volume = 0
+        found_any_data = False
         
         for row in rows:
             cols = row.find_all('td')
             if len(cols) >= 4:
                 try:
                     vol_text = cols[3].text.strip().replace(',', '')
-                    total_volume += int(vol_text)
+                    if vol_text.isdigit():
+                        total_volume += int(vol_text)
+                        found_any_data = True
                 except ValueError:
                     continue
         
-        # إذا لم يجد بيانات (السوق مغلق)، نضع قيمة افتراضية حتى تشاهد الشارت فوراً
-        if total_volume == 0:
-            total_volume = 5200000
+        # لا نحفظ أو نحدث إلا إذا جلبنا أرقاماً حقيقية وصحيحة من جدول تداول
+        if found_any_data and total_volume > 0:
+            today = str(date.today())
+            history[today] = total_volume
             
-        today = str(date.today())
-        
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                history = json.load(f)
-        else:
-            history = {
-                "2026-06-22": 4200000,
-                "2026-06-23": 4600000,
-                "2026-06-24": 4900000
-            }
-            
-        history[today] = total_volume
-        
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history, f, ensure_ascii=False, indent=4)
-            
-        return history
+            with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(history, f, ensure_ascii=False, indent=4)
+                
     except Exception as e:
         print(f"حدث خطأ أثناء جلب البيانات: {e}")
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
+        
+    return history
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -96,7 +93,7 @@ HTML_TEMPLATE = """
             data: {
                 labels: labels,
                 datasets: [{
-                    label: 'إجمالي الأسهم المقرضة',
+                    label: 'إجمالي الأسهم المقرضة الحقيقية',
                     data: dataValues,
                     borderColor: '#2980b9',
                     backgroundColor: 'rgba(41, 128, 185, 0.1)',

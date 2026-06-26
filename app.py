@@ -1,9 +1,163 @@
-<script>
+import os
+import json
+import base64
+from datetime import datetime
+import pytz
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask, render_template_string
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+app = Flask(__name__)
+
+GITHUB_TOKEN = os.environ.get("GH_TOKEN")
+GITHUB_REPO = "roi-sa/sbl-indicator"
+DATA_FILE = "sbl_history.json"
+
+def get_saudi_date():
+    saudi_tz = pytz.timezone('Asia/Riyadh')
+    return str(datetime.now(saudi_tz).date())
+
+def get_github_file():
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DATA_FILE}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+    try:
+        res = requests.get(url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            file_data = res.json()
+            content = base64.b64decode(file_data['content']).decode('utf-8')
+            return json.loads(content), file_data['sha'], "success"
+        return {}, None, "not_found"
+    except Exception as e:
+        return {}, None, str(e)
+
+def save_github_file(history_data, sha):
+    if not GITHUB_TOKEN:
+        return False, "missing_token"
+    
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DATA_FILE}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    content_bytes = json.dumps(history_data, ensure_ascii=False, indent=4).encode('utf-8')
+    content_b64 = base64.b64encode(content_bytes).decode('utf-8')
+    
+    payload = {
+        "message": f"automated-update-{get_saudi_date()}",
+        "content": content_b64,
+        "branch": "main"
+    }
+    if sha: 
+        payload["sha"] = sha
+        
+    try:
+        res = requests.put(url, headers=headers, json=payload, timeout=12)
+        if res.status_code in [200, 201]:
+            return True, "saved"
+        return False, f"status_{res.status_code}"
+    except Exception as e:
+        return False, str(e)
+
+def fetch_and_save_data():
+    url = "https://www.saudiexchange.sa/Resources/Reports-v2/SBLReport_ar.html"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    }
+    
+    history, sha, db_msg = get_github_file()
+    current_date = get_saudi_date()
+    
+    try:
+        response = requests.get(url, headers=headers, verify=False, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
+        rows = soup.find_all('tr')
+        
+        today_data = {"تاسي": {"name": "كامل السوق - تاسي", "volume": 0}}
+        found_any_data = False
+        
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 4:
+                try:
+                    sym_text = cols[0].text.strip()
+                    name_text = cols[1].text.strip()
+                    vol_text = cols[3].text.strip().replace(',', '')
+                    
+                    if sym_text.isdigit() and vol_text.isdigit():
+                        vol_val = int(vol_text)
+                        today_data[sym_text] = {"name": name_text, "volume": vol_val}
+                        today_data["تاسي"]["volume"] += vol_val
+                        found_any_data = True
+                except Exception:
+                    continue
+        
+        if found_any_data and today_data["تاسي"]["volume"] > 0:
+            history[current_date] = today_data
+            success, save_msg = save_github_file(history, sha)
+            return history, f"تم التحديث بنجاح | {save_msg}"
+        else:
+            return history, "عرض البيانات التاريخية الجاهزة (السوق مغلق أو لا بيانات جديدة)"
+    except Exception as e:
+        return history, f"عرض البيانات التاريخية الجاهزة | خطأ جلب حية: {str(e)}"
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>مؤشر حركة الأسهم المقرضة</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 30px; background-color: #f4f7f6; color: #333; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        h1 { color: #2c3e50; text-align: center; font-size: 22px; margin-bottom: 5px; }
+        .status-bar { text-align: center; color: #7f8c8d; font-size: 13px; margin-bottom: 25px; }
+        .control-panel { background: #ecf0f1; padding: 15px; border-radius: 8px; display: flex; gap: 15px; align-items: center; justify-content: center; flex-wrap: wrap; margin-bottom: 25px; }
+        .search-group, .select-group { display: flex; align-items: center; gap: 8px; }
+        select, input { padding: 8px 12px; border: 1px solid #bdc3c7; border-radius: 5px; font-size: 14px; }
+        input { width: 140px; }
+        select { min-width: 240px; max-width: 320px; }
+        button { padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold; }
+        .btn-search { background-color: #34495e; color: white; }
+        .btn-execute { background-color: #27ae60; color: white; padding: 8px 25px; }
+        .chart-title { text-align: center; font-size: 18px; font-weight: bold; color: #2980b9; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>مؤشر حركة كميات الأسهم المقرضة الحية</h1>
+        <div class="status-bar">{{ status_message }}</div>
+        
+        <div class="control-panel">
+            <div class="search-group">
+                <label>بحث بالرمز:</label>
+                <input type="text" id="searchInput" placeholder="مثال: 1010">
+                <button class="btn-search" onclick="searchAndSelectCompany()">بحث</button>
+            </div>
+            
+            <div class="select-group">
+                <label>قائمة الشركات:</label>
+                <select id="companySelect">
+                    <option value="تاسي">كل الأسهم - تاسي</option>
+                </select>
+            </div>
+            
+            <button class="btn-execute" onclick="updateChart()">عرض المؤشر</button>
+        </div>
+
+        <div class="chart-title" id="displayTitle">المعروض الآن: كل الأسهم - تاسي</div>
+        <canvas id="sblChart" width="400" height="160"></canvas>
+    </div>
+
+    <script>
         const rawHistory = {{ history_data | tojson }};
-        // ترتيب التواريخ تصاعدياً
         const labels = Object.keys(rawHistory).sort();
         
-        // مسح شامل لجمع الشركات من كل التواريخ
         const globalCompanies = {};
         labels.forEach(date => {
             const dayData = rawHistory[date];
@@ -16,7 +170,6 @@
             }
         });
 
-        // تعبئة القائمة المستدلة
         const selectDropdown = document.getElementById('companySelect');
         Object.keys(globalCompanies).sort((a, b) => parseInt(a) - parseInt(b)).forEach(sym => {
             let opt = document.createElement('option');
@@ -25,7 +178,6 @@
             selectDropdown.appendChild(opt);
         });
 
-        // تجهيز مكان الرسم البياني
         const ctx = document.getElementById('sblChart').getContext('2d');
         let chartInstance = null;
 
@@ -34,47 +186,44 @@
             let chartLabels = [];
             let companyName = symbol === "تاسي" ? "كامل السوق - تاسي" : (globalCompanies[symbol] || "");
 
-            // بناء البيانات: نقوم بالمرور على التواريخ، وإذا لم توجد بيانات نضع 0 أو نتخطى
             labels.forEach(date => {
                 if (rawHistory[date] && rawHistory[date][symbol] !== undefined) {
-                    chartLabels.push(date); // إضافة التاريخ كنص صريح
-                    chartDataValues.push(rawHistory[date][symbol].volume); // إضافة الكمية كعدد
+                    chartLabels.push(date);
+                    chartDataValues.push(rawHistory[date][symbol].volume);
                 }
             });
 
             document.getElementById('displayTitle').innerText = `المعروض الآن: ${symbol === "تاسي" ? "" : symbol + " - "} ${companyName}`;
             
-            // تدمير الرسم القديم لمنع تداخل الرسومات
             if (chartInstance) {
                 chartInstance.destroy();
             }
 
-            // إنشاء الرسم الجديد مع إجبار المحاور على القراءة النصية والعددية الصحيحة
             chartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: chartLabels, // المحور X يحتوي على التواريخ نصوصاً
+                    labels: chartLabels,
                     datasets: [{
-                        label: symbol === "تاسي" ? "إجمالي الأسهم المقراضة بالسوق" : `حركة كميات الأسهم لـ ${companyName}`,
-                        data: chartDataValues, // المحور Y يحتوي على الكميات الحقيقية
+                        label: symbol === "تاسي" ? "إجمالي الأسهم المقرضة بالسوق" : `حركة كميات الأسهم لـ ${companyName}`,
+                        data: chartDataValues,
                         borderColor: symbol === "تاسي" ? '#2980b9' : '#e67e22',
                         backgroundColor: symbol === "تاسي" ? 'rgba(41, 128, 185, 0.05)' : 'rgba(230, 126, 34, 0.05)',
                         borderWidth: 3,
                         tension: 0.1,
                         fill: true,
-                        pointRadius: 5,
-                        pointHoverRadius: 7
+                        pointRadius: 6,
+                        pointHoverRadius: 8
                     }]
                 },
                 options: {
                     responsive: true,
                     scales: {
                         x: {
-                            type: 'category', // إجبار المحور الأفقي على معاملة التواريخ كنصوص صريحة وعدم تخمينها كأرقام أو أوقات
+                            type: 'category',
                             title: { display: true, text: 'التاريخ' }
                         },
                         y: { 
-                            beginAtZero: true, // إجبار المحور على البدء من الصفر صعوداً إلى الملايين
+                            beginAtZero: true,
                             title: { display: true, text: 'الكمية (سهم)' }
                         }
                     }
@@ -103,6 +252,16 @@
             drawChartFor(selectVal);
         }
 
-        // تشغيل افتراضي
         drawChartFor("تاسي");
     </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    chart_data, status_msg = fetch_and_save_data()
+    return render_template_string(HTML_TEMPLATE, history_data=chart_data, status_message=status_msg)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))

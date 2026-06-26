@@ -17,7 +17,7 @@ def fetch_and_save_data():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
-    # 1. تحميل التاريخ الحالي المخزن لعدم الكتابة فوق القديم
+    # 1. تحميل البيانات التاريخية الحالية لتجنب مسحها
     history = {}
     if os.path.exists(DATA_FILE):
         try:
@@ -31,16 +31,19 @@ def fetch_and_save_data():
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 2. استخراج تاريخ التقرير الحقيقي المنشور في الصفحة (مثال: 2026-06-25)
+        # 2. جلب تاريخ التحديث الفعلي الصريح من التقرير (لمنع اختراع أيام مستقبلية)
         page_text = soup.get_text()
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', page_text)
-        report_date = date_match.group(1) if date_match else "unknown"
+        report_date = date_match.group(1) if date_match else None
         
+        if not report_date:
+            return history
+
         rows = soup.find_all('tr')
         today_data = {"تاسي": {"name": "كامل السوق - تاسي", "volume": 0}}
         found_any_data = False
         
-        # 3. استخدام نفس منطق التنظيف الخاص بك والناجح في قراءة الأعمدة
+        # 3. قراءة وتقسيم البيانات (نفس منطق الحلقات البسيط والناجح الخاص بك)
         for row in rows:
             cols = row.find_all('td')
             if len(cols) >= 4:
@@ -52,16 +55,18 @@ def fetch_and_save_data():
                     if vol_text.isdigit():
                         vol_val = int(vol_text)
                         if vol_val > 0:
-                            # حفظ إجمالي تاسي وحفظ الشركات الفردية بشكل مستقل
+                            # إضافة للكمية الإجمالية لتاسي
                             today_data["تاسي"]["volume"] += vol_val
+                            
+                            # إذا كان رمز شركة حقيقي (4 أرقام) نقوم بحفظه بشكل مستقل للقائمة
                             if sym_text.isdigit() and len(sym_text) == 4:
                                 today_data[sym_text] = {"name": name_text, "volume": vol_val}
                             found_any_data = True
                 except ValueError:
                     continue
         
-        # 4. الحفظ في الملف بالهيكل الجديد المنسق فقط إذا كانت البيانات حقيقية وبكامل الشركات
-        if found_any_data and today_data["تاسي"]["volume"] > 0 and report_date != "unknown":
+        # 4. الحفظ بالبنية المحدثة فقط في حال وجود أرقام حقيقية مؤكدة
+        if found_any_data and today_data["تاسي"]["volume"] > 0:
             history[report_date] = today_data
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
                 json.dump(history, f, ensure_ascii=False, indent=4)
@@ -86,10 +91,9 @@ HTML_TEMPLATE = """
         .search-group, .select-group { display: flex; align-items: center; gap: 8px; }
         select, input { padding: 8px 12px; border: 1px solid #bdc3c7; border-radius: 5px; font-size: 14px; }
         input { width: 120px; }
-        select { min-width: 250px; }
+        select { min-width: 260px; }
         button { padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold; }
         .btn-search { background-color: #34495e; color: white; }
-        .btn-execute { background-color: #27ae60; color: white; }
         .chart-title { text-align: center; font-size: 18px; font-weight: bold; color: #2980b9; margin-top: 15px; margin-bottom: 10px; }
     </style>
 </head>
@@ -118,11 +122,9 @@ HTML_TEMPLATE = """
 
     <script>
         const rawHistory = {{ data | tojson }};
-        
-        // تنظيف التواريخ ودعم التوافقية مع الملف القديم (سواء كان رقم مباشر أو كائن معقد)
         const labels = Object.keys(rawHistory).sort();
         
-        // استخراج قائمة أسماء الشركات ديناميكياً من كافة التواريخ المتوفرة لتعبئة المنسدلة
+        // جلب قائمة الشركات المتاحة في ملف البيانات لتعبئة القائمة المنسدلة تلقائياً
         const globalCompanies = {};
         labels.forEach(date => {
             const dayData = rawHistory[date];
@@ -135,7 +137,7 @@ HTML_TEMPLATE = """
             }
         });
 
-        // تعبئة القائمة المنسدلة بالشركات المكتشفة مرتبة بالرمز
+        // تعبئة القائمة المنسدلة بالرموز والأسماء الحقيقية المستخرجة
         const selectDropdown = document.getElementById('companySelect');
         Object.keys(globalCompanies).sort((a, b) => parseInt(a) - parseInt(b)).forEach(sym => {
             let opt = document.createElement('option');
@@ -154,18 +156,18 @@ HTML_TEMPLATE = """
 
             labels.forEach(date => {
                 const dayData = rawHistory[date];
-                if (dayData !== undefined && dayData !== null) {
+                if (dayData) {
                     chartLabels.push(date);
                     
-                    // دعم التوافق التام: إذا كان التاريخ القديم يحمل الرقم الإجمالي مباشرة أو كائن حديث
+                    // التوافقية التامة مع البيانات القديمة والجديدة
                     if (typeof dayData === 'object') {
                         if (dayData[symbol] !== undefined) {
                             chartDataValues.push(dayData[symbol].volume);
                         } else {
-                            chartDataValues.push(0); // صفر للأيام التي لم تكن الشركة مدرجة بالتقرير فيها
+                            chartDataValues.push(0); // تصفير الأيام التي لم تظهر فيها الشركة في التقرير
                         }
                     } else {
-                        // البيانات القديمة المسطحة تذهب لتاسي تلقائياً
+                        // دعم التوافق مع الهيكل القديم المنسق كتأمين
                         chartDataValues.push(symbol === "تاسي" ? dayData : 0);
                     }
                 }
@@ -209,7 +211,7 @@ HTML_TEMPLATE = """
                 selectDropdown.value = searchVal;
                 updateChart();
             } else {
-                alert("الرمز غير موجود في البيانات التاريخية الحالية.");
+                alert("الرمز غير موجود في البيانات التاريخية المتوفرة.");
             }
         }
 
@@ -217,7 +219,7 @@ HTML_TEMPLATE = """
             drawChartFor(selectDropdown.value);
         }
 
-        // تشغيل الرسم البياني الافتراضي لتاسي فور تحميل الصفحة
+        // تشغيل المؤشر الافتراضي لتاسي فور الدخول
         drawChartFor("تاسي");
     </script>
 </body>

@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from flask import Flask, render_template_string
 import urllib3
 
+# إيقاف تحذيرات شهادات الأمان
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -64,27 +65,39 @@ def save_github_file(history_data, sha):
 
 def fetch_and_save_data():
     url = "https://www.saudiexchange.sa/Resources/Reports-v2/SBLReport_ar.html"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     history, sha, db_msg = get_github_file()
     try:
         response = requests.get(url, headers=headers, verify=False, timeout=15)
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         rows = soup.find_all('tr')
+        
         today_data = {"تاسي": {"name": "كامل السوق", "volume": 0}}
+        
         for row in rows:
             cols = [td.text.strip() for td in row.find_all(['td', 'th'])]
-            if len(cols) >= 4 and cols[0].isdigit() and cols[3].replace(',', '').isdigit():
-                today_data[cols[0]] = {"name": cols[1], "volume": int(cols[3].replace(',', ''))}
-                today_data["تاسي"]["volume"] += int(cols[3].replace(',', ''))
+            if len(cols) >= 4:
+                symbol = cols[0].replace(' ', '').strip()
+                volume_text = cols[3].replace(',', '').replace(' ', '').strip()
+                
+                if symbol.isdigit() and volume_text.isdigit():
+                    vol_value = int(volume_text)
+                    today_data[symbol] = {"name": cols[1].strip(), "volume": vol_value}
+                    today_data["تاسي"]["volume"] += vol_value
         
-        history[get_saudi_date()] = today_data
-        success, save_msg = save_github_file(history, sha)
-        return history, f"{db_msg} | {save_msg}"
+        if today_data["تاسي"]["volume"] > 0:
+            history[get_saudi_date()] = today_data
+            success, save_msg = save_github_file(history, sha)
+            return history, f"{db_msg} | {save_msg}"
+        else:
+            return history, f"{db_msg} | تنبيه: لم يتم العثور على أي كميات أسهم في الجدول اليوم."
+            
     except Exception as e:
         return history, f"خطأ معالجة: {str(e)}"
 
-# ==================== تعديل واجهة العرض التفاعلية فقط ====================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -129,7 +142,6 @@ HTML_TEMPLATE = """
         const rawHistory = {{ history_data | tojson }};
         const labels = Object.keys(rawHistory).sort();
         
-        // 1. تجميع قائمة ديناميكية بالشركات المتاحة من آخر تاريخ مسجل
         if (labels.length > 0) {
             const lastDate = labels[labels.length - 1];
             const lastDayData = rawHistory[lastDate];
@@ -145,7 +157,6 @@ HTML_TEMPLATE = """
             });
         }
 
-        // 2. إعداد الشارت ككائن رئيسي قابل للتحديث
         const ctx = document.getElementById('sblChart').getContext('2d');
         let chartInstance = new Chart(ctx, {
             type: 'line',
@@ -153,7 +164,6 @@ HTML_TEMPLATE = """
             options: { responsive: true, scales: { y: { beginAtZero: false } } }
         });
 
-        // 3. دالة معالجة ورسم البيانات للشركة المحددة
         function drawChartFor(symbol) {
             let chartDataValues = [];
             let chartLabels = [];
@@ -167,13 +177,9 @@ HTML_TEMPLATE = """
                 }
             });
 
-            // تحديث عنوان الشارت الظاهر للمستخدم
             document.getElementById('displayTitle').innerText = symbol === "تاسي" ? "المعروض الآن: كامل السوق - تاسي" : `المعروض الآن: ${symbol} - ${companyName}`;
-
-            // تدمير الشارت القديم لمنع تداخل الرسوم عند اختيار شركة أخرى
             chartInstance.destroy();
 
-            // رسم الخط البياني الجديد
             chartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
@@ -198,7 +204,6 @@ HTML_TEMPLATE = """
             });
         }
 
-        // 4. معالجة زر التنفيذ (دمج خانة البحث مع القائمة المنسدلة)
         function updateChart() {
             const searchVal = document.getElementById('searchInput').value.trim();
             const selectVal = document.getElementById('companySelect').value;
@@ -218,13 +223,11 @@ HTML_TEMPLATE = """
             }
         }
 
-        // تشغيل العرض التلقائي على تاسي عند فتح الصفحة لأول مرة
         drawChartFor("تاسي");
     </script>
 </body>
 </html>
 """
-# =========================================================================
 
 @app.route('/')
 def index():

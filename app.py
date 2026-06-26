@@ -8,12 +8,11 @@ from bs4 import BeautifulSoup
 from flask import Flask, render_template_string
 import urllib3
 
-# إيقاف تحذيرات شهادات الأمان المزعجة
+# إيقاف تحذيرات شهادات الأمان
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
-# إعدادات الاتصال بمستودع GitHub الخاص بك لحفظ الملف التراكمي
 GITHUB_TOKEN = os.environ.get("GH_TOKEN")
 GITHUB_REPO = "roi-sa/sbl-indicator"
 DATA_FILE = "sbl_history.json"
@@ -56,17 +55,17 @@ def save_github_file(history_data, sha):
         
     try:
         res = requests.put(url, headers=headers, json=payload, timeout=10)
-        print(f"DEBUG_INFO: Status={res.status_code}, Response={res.text}")
-        
         if res.status_code in [200, 201]:
             return True, "تم الحفظ بنجاح."
-        return False, f"فشل الحفظ. كود: {res.status_code}, الرد: {res.text}"
+        return False, f"فشل الحفظ. كود: {res.status_code}"
     except Exception as e:
         return False, f"خطأ في الحفظ: {str(e)}"
 
 def fetch_and_save_data():
     url = "https://www.saudiexchange.sa/Resources/Reports-v2/SBLReport_ar.html"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     history, sha, db_msg = get_github_file()
     try:
         response = requests.get(url, headers=headers, verify=False, timeout=15)
@@ -74,29 +73,34 @@ def fetch_and_save_data():
         soup = BeautifulSoup(response.text, 'html.parser')
         rows = soup.find_all('tr')
         
-        # هيكلة تخزين اليوم: نضع "تاسي" كعنصر رئيسي لحساب الإجمالي تلقائياً
-        today_data = {"تاسي": {"name": "كامل الأسهم - تاسي", "volume": 0}}
+        today_data = {"تاسي": {"name": "كامل السوق - تاسي", "volume": 0}}
+        found_any_data = False
         
         for row in rows:
-            cols = [td.text.strip() for td in row.find_all(['td', 'th'])]
-            if len(cols) >= 4 and cols[0].isdigit() and cols[3].replace(',', '').isdigit():
-                symbol = cols[0]
-                name = cols[1]
-                volume = int(cols[3].replace(',', ''))
-                
-                # تخزين كل شركة بشكل منفصل برمزها واسمها وعدد أسهمها
-                today_data[symbol] = {"name": name, "volume": volume}
-                # جمع التراكمي لإجمالي السوق في تاسي
-                today_data["تاسي"]["volume"] += volume
+            cols = row.find_all('td')
+            if len(cols) >= 4:
+                try:
+                    sym_text = cols[0].text.strip()
+                    name_text = cols[1].text.strip()
+                    vol_text = cols[3].text.strip().replace(',', '')
+                    
+                    if sym_text.isdigit() and vol_text.isdigit():
+                        vol_val = int(vol_text)
+                        today_data[sym_text] = {"name": name_text, "volume": vol_val}
+                        today_data["تاسي"]["volume"] += vol_val
+                        found_any_data = True
+                except Exception:
+                    continue
         
-        # حفظ التحديث التراكمي لليوم في مستودع GitHub
-        history[get_saudi_date()] = today_data
-        success, save_msg = save_github_file(history, sha)
-        return history, f"{db_msg} | {save_msg}"
+        if found_any_data and today_data["تاسي"]["volume"] > 0:
+            history[get_saudi_date()] = today_data
+            success, save_msg = save_github_file(history, sha)
+            return history, f"{db_msg} | {save_msg}"
+        else:
+            return history, f"{db_msg} | تنبيه: لم يتم جلب بيانات جديدة من الجدول."
     except Exception as e:
         return history, f"خطأ معالجة: {str(e)}"
 
-# واجهة العرض التفاعلية الكاملة بالأدوات المطلوبة
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -109,20 +113,16 @@ HTML_TEMPLATE = """
         .container { max-width: 950px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
         h1 { color: #2c3e50; text-align: center; font-size: 22px; margin-bottom: 5px; }
         .status-bar { text-align: center; color: #7f8c8d; font-size: 13px; margin-bottom: 25px; }
-        
         .control-panel { background: #ecf0f1; padding: 15px; border-radius: 8px; display: flex; gap: 15px; align-items: center; justify-content: center; flex-wrap: wrap; margin-bottom: 25px; }
         .search-group, .select-group { display: flex; align-items: center; gap: 8px; }
-        
         select, input { padding: 8px 12px; border: 1px solid #bdc3c7; border-radius: 5px; font-size: 14px; }
         input { width: 140px; }
         select { min-width: 220px; max-width: 300px; }
-        
         button { padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold; }
         .btn-search { background-color: #34495e; color: white; }
         .btn-search:hover { background-color: #2c3e50; }
         .btn-execute { background-color: #27ae60; color: white; padding: 8px 25px; }
         .btn-execute:hover { background-color: #219653; }
-        
         .chart-title { text-align: center; font-size: 18px; font-weight: bold; color: #2980b9; margin-bottom: 15px; }
     </style>
 </head>
@@ -156,31 +156,31 @@ HTML_TEMPLATE = """
         const rawHistory = {{ history_data | tojson }};
         const labels = Object.keys(rawHistory).sort();
         
-        // 1. بناء خيارات القائمة المنسدلة تلقائياً من آخر بيانات مسجلة في الملف
+        // بناء قائمة الشركات بناءً على آخر تاريخ متوفر (لأنه يحتوي على القائمة الكاملة)
         if (labels.length > 0) {
             const lastDate = labels[labels.length - 1];
             const lastDayData = rawHistory[lastDate];
             const selectDropdown = document.getElementById('companySelect');
             
-            Object.keys(lastDayData).forEach(symbol => {
-                if (symbol !== "تاسي") {
-                    let opt = document.createElement('option');
-                    opt.value = symbol;
-                    opt.text = `${symbol} - ${lastDayData[symbol].name}`;
-                    selectDropdown.appendChild(opt);
-                }
+            // استخراج الأكواد وترتيبها عددياً
+            const symbols = Object.keys(lastDayData).filter(s => s !== "تاسي").sort((a, b) => parseInt(a) - parseInt(b));
+            
+            symbols.forEach(symbol => {
+                let opt = document.createElement('option');
+                opt.value = symbol;
+                opt.text = `${symbol} - ${lastDayData[symbol].name}`;
+                selectDropdown.appendChild(opt);
             });
         }
 
-        // 2. تهيئة مساحة الرسم البياني الأساسية
         const ctx = document.getElementById('sblChart').getContext('2d');
         let chartInstance = new Chart(ctx, {
             type: 'line',
             data: { labels: [], datasets: [{ data: [] }] },
-            options: { responsive: true, scales: { y: { beginAtZero: false } } }
+            options: { responsive: true }
         });
 
-        // 3. وظيفة زر البحث: التحقق من الرمز وتثبيته داخل القائمة المنسدلة
+        // وظيفة البحث ونقل المؤشر إلى الخيار المطلوب داخل القائمة المنسدلة
         function searchAndSelectCompany() {
             const searchVal = document.getElementById('searchInput').value.trim();
             const selectDropdown = document.getElementById('companySelect');
@@ -189,68 +189,69 @@ HTML_TEMPLATE = """
                 alert("الرجاء كتابة رمز الشركة أولاً.");
                 return;
             }
-            
-            if (searchVal === "تاسي") {
+            if (searchVal === "تاسي" || searchVal === "كل الأسهم - تاسي") {
                 selectDropdown.value = "تاسي";
                 return;
             }
             
-            // البحث داخل خيارات القائمة للتأكد من مطابقة الرمز
             let found = false;
             for (let i = 0; i < selectDropdown.options.length; i++) {
                 if (selectDropdown.options[i].value === searchVal) {
-                    selectDropdown.value = searchVal; // تثبيت الشركة المحددة في القائمة المنسدلة
+                    selectDropdown.value = searchVal;
                     found = true;
                     break;
                 }
             }
-            
             if (!found) {
                 alert("رمز الشركة غير موجود في القائمة الحالية المحدثة.");
             }
         }
 
-        // 4. وظيفة زر التنفيذ: رسم حركة إقراض الأسهم للشركة المثبتة حالياً في القائمة المنسدلة
+        // رسم المنحنى البياني مع التوافقية الكاملة لبيانات تاسي القديمة والجديدة
         function drawChartFor(symbol) {
             let chartDataValues = [];
             let chartLabels = [];
-            let companyName = "كامل السوق";
+            let companyName = "";
 
-            // قراءة السلسلة التاريخية للرمز المحدد وتثبيت النقاط التاريخية السابقة
             labels.forEach(date => {
                 if (rawHistory[date] && rawHistory[date][symbol]) {
                     chartLabels.push(date);
                     chartDataValues.push(rawHistory[date][symbol].volume);
-                    companyName = rawHistory[date][symbol].name;
+                    if (!companyName) {
+                        companyName = rawHistory[date][symbol].name;
+                    }
                 }
             });
 
-            document.getElementById('displayTitle').innerText = symbol === "تاسي" ? "المعروض الآن: كل الأسهم - تاسي" : `المعروض الآن: ${symbol} - ${companyName}`;
-            
-            // تدمير الكائن السابق للشارت لمنع التداخل والوميض عند الانتقال لشركة أخرى
+            if (symbol === "تاسي") {
+                companyName = "كل الأسهم - تاسي";
+            }
+
+            document.getElementById('displayTitle').innerText = `المعروض الآن: ${symbol === "تاسي" ? "" : symbol + " - "} ${companyName}`;
             chartInstance.destroy();
 
-            // رسم الخط البياني بالنقاط التراكمية التاريخية الثابتة
             chartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: chartLabels,
                     datasets: [{
-                        label: symbol === "تاسي" ? "إجمالي الأسهم المقراضة لكل شركات السوق" : `حركة كميات الأسهم المقراضة لـ ${companyName}`,
+                        label: symbol === "تاسي" ? "إجمالي الأسهم المقرضة بالسوق" : `حركة كميات الأسهم لـ ${companyName}`,
                         data: chartDataValues,
                         borderColor: symbol === "تاسي" ? '#2980b9' : '#e67e22',
                         backgroundColor: symbol === "تاسي" ? 'rgba(41, 128, 185, 0.05)' : 'rgba(230, 126, 34, 0.05)',
                         borderWidth: 3,
                         tension: 0.1,
                         fill: true,
-                        pointRadius: 5,
-                        pointHoverRadius: 7
+                        pointRadius: 5
                     }]
                 },
                 options: {
                     responsive: true,
                     scales: {
-                        y: { title: { display: true, text: 'الكمية (سهم)' } },
+                        y: { 
+                            title: { display: true, text: 'الكمية (سهم)' },
+                            beginAtZero: false 
+                        },
                         x: { title: { display: true, text: 'التاريخ' } }
                     }
                 }
@@ -262,7 +263,7 @@ HTML_TEMPLATE = """
             drawChartFor(selectVal);
         }
 
-        // تشغيل الرسم الافتراضي الأولي لكامل السوق (تاسي) عند فتح الصفحة لأول مرة
+        // التشغيل التلقائي الأولي على مؤشر تاسي عند فتح الصفحة
         drawChartFor("تاسي");
     </script>
 </body>

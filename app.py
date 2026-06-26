@@ -12,7 +12,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
-# الإعدادات
 GITHUB_TOKEN = os.environ.get("GH_TOKEN")
 GITHUB_REPO = "roi-sa/sbl-indicator"
 DATA_FILE = "sbl_history.json"
@@ -29,14 +28,14 @@ def get_github_file():
         if res.status_code == 200:
             file_data = res.json()
             content = base64.b64decode(file_data['content']).decode('utf-8')
-            return json.loads(content), file_data['sha'], "تمت قراءة قاعدة البيانات التاريخية بنجاح."
-        return {}, None, f"تنبيه: لم يتم العثور على الملف التاريخي (كود: {res.status_code}). سيتم إنشاء ملف جديد."
+            return json.loads(content), file_data['sha'], "تمت قراءة قاعدة البيانات بنجاح."
+        return {}, None, f"تنبيه: لم يتم العثور على الملف (كود: {res.status_code})."
     except Exception as e:
-        return {}, None, f"خطأ أثناء الاتصال بجيت هاب: {str(e)}"
+        return {}, None, f"خطأ الاتصال: {str(e)}"
 
 def save_github_file(history_data, sha):
     if not GITHUB_TOKEN:
-        return False, "خطأ: الرمز السري GH_TOKEN غير معرف في بيئة Render!"
+        return False, "خطأ: GH_TOKEN غير موجود."
     
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DATA_FILE}"
     headers = {
@@ -46,98 +45,56 @@ def save_github_file(history_data, sha):
     content_bytes = json.dumps(history_data, ensure_ascii=False, indent=4).encode('utf-8')
     content_b64 = base64.b64encode(content_bytes).decode('utf-8')
     
-    today_str = get_saudi_date()
     payload = {
-        "message": f"تحديث تلقائي مستقر لبيانات الإقراض بتاريخ {today_str}",
+        "message": f"تحديث بتاريخ {get_saudi_date()}",
         "content": content_b64,
         "branch": "main"
     }
-    if sha:
-        payload["sha"] = sha
+    if sha: payload["sha"] = sha
         
     try:
         res = requests.put(url, headers=headers, json=payload, timeout=10)
+        # سطر التصحيح
+        print(f"DEBUG_INFO: Status={res.status_code}, Response={res.text}")
+        
         if res.status_code in [200, 201]:
-            return True, "تم حفظ وتثبيت البيانات الجديدة بنجاح! 🎉"
-        return False, f"فشل الحفظ في جيت هاب. كود الخطأ: {res.status_code}"
+            return True, "تم الحفظ بنجاح."
+        return False, f"فشل الحفظ. كود: {res.status_code}, الرد: {res.text}"
     except Exception as e:
-        return False, f"حدث خطأ أثناء إرسال البيانات: {str(e)}"
+        return False, f"خطأ في الحفظ: {str(e)}"
 
 def fetch_and_save_data():
     url = "https://www.saudiexchange.sa/Resources/Reports-v2/SBLReport_ar.html"
     headers = {'User-Agent': 'Mozilla/5.0'}
-    
     history, sha, db_msg = get_github_file()
-    status_msg = db_msg
-
     try:
         response = requests.get(url, headers=headers, verify=False, timeout=15)
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         rows = soup.find_all('tr')
-        today_data = {}
-        total_market_volume = 0
-        
+        today_data = {"تاسي": {"name": "كامل السوق", "volume": 0}}
         for row in rows:
             cols = [td.text.strip() for td in row.find_all(['td', 'th'])]
-            if len(cols) >= 4:
-                comp_code = cols[0].replace(' ', '')
-                comp_name = cols[1]
-                vol_text = cols[3].replace(',', '').replace(' ', '')
-                
-                if comp_code.isdigit() and vol_text.isdigit():
-                    volume = int(vol_text)
-                    today_data[comp_code] = {"name": comp_name, "volume": volume}
-                    total_market_volume += volume
+            if len(cols) >= 4 and cols[0].isdigit() and cols[3].replace(',', '').isdigit():
+                today_data[cols[0]] = {"name": cols[1], "volume": int(cols[3].replace(',', ''))}
+                today_data["تاسي"]["volume"] += int(cols[3].replace(',', ''))
         
-        today_str = get_saudi_date()
-        today_data["تاسي"] = {"name": "كامل السوق - تاسي", "volume": total_market_volume}
-        
-        history[today_str] = today_data
+        history[get_saudi_date()] = today_data
         success, save_msg = save_github_file(history, sha)
-        status_msg += " | " + save_msg
+        return history, f"{db_msg} | {save_msg}"
     except Exception as e:
-        status_msg += f" | خطأ أثناء معالجة البيانات: {str(e)}"
-        
-    return history, status_msg
+        return history, f"خطأ معالجة: {str(e)}"
 
 HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <title>مؤشر الأسهم المقرضة</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-    <div style="text-align:center; padding: 20px;">
-        <h1>بيانات الأسهم المقرضة</h1>
-        <p style="color: #555;">{{ status_message }}</p>
-        <canvas id="sblChart" width="400" height="150"></canvas>
-    </div>
-    <script>
-        const rawHistory = {{ history_data | tojson }};
-        const ctx = document.getElementById('sblChart').getContext('2d');
-        const labels = Object.keys(rawHistory).sort();
-        const tasiData = labels.map(date => rawHistory[date]["تاسي"] ? rawHistory[date]["تاسي"].volume : 0);
-        
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'حركة تاسي - الأسهم المقرضة',
-                    data: tasiData,
-                    borderColor: '#2980b9',
-                    fill: true,
-                    tension: 0.1
-                }]
-            }
-        });
-    </script>
-</body>
-</html>
+<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head>
+<body><div style="text-align:center;"><h1>مؤشر الأسهم</h1><p>{{ status_message }}</p><canvas id="sblChart" width="400" height="150"></canvas></div>
+<script>
+const rawHistory = {{ history_data | tojson }};
+const labels = Object.keys(rawHistory).sort();
+new Chart(document.getElementById('sblChart'), {
+    type: 'line', data: { labels: labels, datasets: [{ label: 'تاسي', data: labels.map(d => rawHistory[d]["تاسي"].volume), borderColor: '#2980b9' }] }
+});
+</script></body></html>
 """
 
 @app.route('/')
@@ -146,5 +103,4 @@ def index():
     return render_template_string(HTML_TEMPLATE, history_data=chart_data, status_message=status_msg)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))

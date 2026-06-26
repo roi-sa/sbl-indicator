@@ -17,7 +17,7 @@ def fetch_and_save_data():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
-    # 1. تحميل البيانات التاريخية الحالية لتجنب مسحها
+    # تحميل التاريخ المخزن لضمان عدم ضياع الأيام السابقة
     history = {}
     if os.path.exists(DATA_FILE):
         try:
@@ -31,46 +31,47 @@ def fetch_and_save_data():
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 2. جلب تاريخ التحديث الفعلي الصريح من التقرير (لمنع اختراع أيام مستقبلية)
+        # استخراج تاريخ التقرير الحقيقي من الصفحة لمنع اختراع أرقام مستقبلية
         page_text = soup.get_text()
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', page_text)
         report_date = date_match.group(1) if date_match else None
         
-        if not report_date:
-            return history
-
-        rows = soup.find_all('tr')
-        today_data = {"تاسي": {"name": "كامل السوق - تاسي", "volume": 0}}
-        found_any_data = False
-        
-        # 3. قراءة وتقسيم البيانات (نفس منطق الحلقات البسيط والناجح الخاص بك)
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) >= 4:
-                try:
-                    sym_text = cols[0].text.strip()
-                    name_text = cols[1].text.strip()
-                    vol_text = cols[3].text.strip().replace(',', '')
+        if report_date:
+            rows = soup.find_all('tr')
+            today_data = {"تاسي": {"name": "كامل السوق - تاسي", "volume": 0}}
+            found_any_data = False
+            
+            for row in rows:
+                cols = row.find_all('td')
+                if len(cols) >= 4:
+                    try:
+                        sym_text = cols[0].text.strip()
+                        name_text = cols[1].text.strip()
+                        vol_text = cols[3].text.strip().replace(',', '')
+                        
+                        if vol_text.isdigit():
+                            vol_val = int(vol_text)
+                            if vol_val > 0:
+                                # حماية هامة: إذا كان السطر هو سطر "الإجمالي" المكتوب من تداول، نتخطاه لكي لا نضاعف الرقم الحقيقي
+                                if "إجمالي" in name_text or "المجموع" in name_text or not sym_text.isdigit():
+                                    continue
+                                
+                                # جمع الشركات لبناء إجمالي السوق (تاسي) الحقيقي والدقيق
+                                today_data["تاسي"]["volume"] += vol_val
+                                
+                                # حفظ كل شركة برمزها الخاص للقائمة المنسدلة والبحث
+                                if len(sym_text) == 4:
+                                    today_data[sym_text] = {"name": name_text, "volume": vol_val}
+                                    found_any_data = True
+                    except ValueError:
+                        continue
+            
+            # الحفظ في الملف بالهيكل الجديد والمحمي فقط عند وجود بيانات صحيحة
+            if found_any_data and today_data["تاسي"]["volume"] > 0:
+                history[report_date] = today_data
+                with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(history, f, ensure_ascii=False, indent=4)
                     
-                    if vol_text.isdigit():
-                        vol_val = int(vol_text)
-                        if vol_val > 0:
-                            # إضافة للكمية الإجمالية لتاسي
-                            today_data["تاسي"]["volume"] += vol_val
-                            
-                            # إذا كان رمز شركة حقيقي (4 أرقام) نقوم بحفظه بشكل مستقل للقائمة
-                            if sym_text.isdigit() and len(sym_text) == 4:
-                                today_data[sym_text] = {"name": name_text, "volume": vol_val}
-                            found_any_data = True
-                except ValueError:
-                    continue
-        
-        # 4. الحفظ بالبنية المحدثة فقط في حال وجود أرقام حقيقية مؤكدة
-        if found_any_data and today_data["تاسي"]["volume"] > 0:
-            history[report_date] = today_data
-            with open(DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump(history, f, ensure_ascii=False, indent=4)
-                
     except Exception as e:
         print(f"حدث خطأ أثناء جلب البيانات: {e}")
         
@@ -85,8 +86,8 @@ HTML_TEMPLATE = """
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 30px; background-color: #f4f7f6; color: #333; }
-        .container { max-width: 950px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
-        h2 { color: #2c3e50; text-align: center; font-size: 20px; margin-bottom: 20px; }
+        .container { max-width: 900px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        h2 { color: #2c3e50; text-align: center; font-size: 20px; margin-bottom: 25px; }
         .control-panel { background: #ecf0f1; padding: 15px; border-radius: 8px; display: flex; gap: 15px; align-items: center; justify-content: center; flex-wrap: wrap; margin-bottom: 25px; }
         .search-group, .select-group { display: flex; align-items: center; gap: 8px; }
         select, input { padding: 8px 12px; border: 1px solid #bdc3c7; border-radius: 5px; font-size: 14px; }
@@ -94,7 +95,7 @@ HTML_TEMPLATE = """
         select { min-width: 260px; }
         button { padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold; }
         .btn-search { background-color: #34495e; color: white; }
-        .chart-title { text-align: center; font-size: 18px; font-weight: bold; color: #2980b9; margin-top: 15px; margin-bottom: 10px; }
+        .chart-title { text-align: center; font-size: 18px; font-weight: bold; color: #2980b9; margin-top: 10px; margin-bottom: 15px; }
     </style>
 </head>
 <body>
@@ -124,7 +125,7 @@ HTML_TEMPLATE = """
         const rawHistory = {{ data | tojson }};
         const labels = Object.keys(rawHistory).sort();
         
-        // جلب قائمة الشركات المتاحة في ملف البيانات لتعبئة القائمة المنسدلة تلقائياً
+        // جلب أسماء الشركات المتوفرة تاريخياً في الملف لملء القائمة المنسدلة بصفة دائمة وثابتة
         const globalCompanies = {};
         labels.forEach(date => {
             const dayData = rawHistory[date];
@@ -137,7 +138,7 @@ HTML_TEMPLATE = """
             }
         });
 
-        // تعبئة القائمة المنسدلة بالرموز والأسماء الحقيقية المستخرجة
+        // تعبئة القائمة المنسدلة بالشركات المكتشفة بصفة نهائية مرتبة تصاعدياً
         const selectDropdown = document.getElementById('companySelect');
         Object.keys(globalCompanies).sort((a, b) => parseInt(a) - parseInt(b)).forEach(sym => {
             let opt = document.createElement('option');
@@ -156,18 +157,18 @@ HTML_TEMPLATE = """
 
             labels.forEach(date => {
                 const dayData = rawHistory[date];
-                if (dayData) {
+                if (dayData !== undefined && dayData !== null) {
                     chartLabels.push(date);
                     
-                    // التوافقية التامة مع البيانات القديمة والجديدة
+                    // إدارة التوافقية التامة: حماية البيانات القديمة المكتوبة كتحديات مسطحة
                     if (typeof dayData === 'object') {
                         if (dayData[symbol] !== undefined) {
                             chartDataValues.push(dayData[symbol].volume);
                         } else {
-                            chartDataValues.push(0); // تصفير الأيام التي لم تظهر فيها الشركة في التقرير
+                            chartDataValues.push(0); 
                         }
                     } else {
-                        // دعم التوافق مع الهيكل القديم المنسق كتأمين
+                        // إذا كانت البيانات قديمة ومجرد أرقام، تعامل كإجمالي تاسي
                         chartDataValues.push(symbol === "تاسي" ? dayData : 0);
                     }
                 }
@@ -211,7 +212,7 @@ HTML_TEMPLATE = """
                 selectDropdown.value = searchVal;
                 updateChart();
             } else {
-                alert("الرمز غير موجود في البيانات التاريخية المتوفرة.");
+                alert("الرمز غير موجود في البيانات التاريخية الحالية.");
             }
         }
 
@@ -219,7 +220,7 @@ HTML_TEMPLATE = """
             drawChartFor(selectDropdown.value);
         }
 
-        // تشغيل المؤشر الافتراضي لتاسي فور الدخول
+        // تشغيل الرسم الافتراضي لتاسي بدقة وبدون مضاعفة الأرقام
         drawChartFor("تاسي");
     </script>
 </body>

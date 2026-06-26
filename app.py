@@ -1,13 +1,12 @@
 import os
 import json
 import re
-from datetime import date
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string
 import urllib3
 
-# إيقاف تحذيرات شهادات الأمان المزعجة من تداول
+# إيقاف تحذيرات شهادات الأمان
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -19,7 +18,6 @@ def fetch_and_save_data():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
-    # 1. تحميل ملف البيانات الحالي التاريخي لمنع الفقدان
     history = {}
     if os.path.exists(DATA_FILE):
         try:
@@ -32,26 +30,23 @@ def fetch_and_save_data():
         response = requests.get(url, headers=headers, verify=False, timeout=15)
         response.encoding = 'utf-8'
         
-        # 2. اقتناص تاريخ التحديث الحقيقي من نص الصفحة (وليس تاريخ الساعة في الخادم)
-        target_date = str(date.today())  # قيمة احتياطية في حال فشل العثور على النص
+        # 1. اقتناص التاريخ الحقيقي بالصيغة العربية للموقع (يوم-شهر-سنة)
+        date_match = re.search(r'(\d{2})-(\d{2})-(\d{4})', response.text)
         
-        # البحث عن نمط التاريخ المرافق لعبارة "تاريخ آخر تحديث"
-        text_match = re.search(r'تاريخ آخر تحديث\s*:\s*(\d{4}-\d{2}-\d{2})', response.text)
-        if text_match:
-            target_date = text_match.group(1)
-        else:
-            # محاولة بحث أوسع عن أي تاريخ يطابق تنسيق السنة-الشهر-اليوم داخل الصفحة
-            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', response.text)
-            if date_match:
-                target_date = date_match.group(1)
+        # حماية صارمة: إذا لم نجد تاريخاً حقيقياً في الصفحة، ننسحب فوراً ولا نعتمد على تاريخ الخادم
+        if not date_match:
+            print("تنبيه أمني: لم يتم العثور على نمط التاريخ في الصفحة. تم إلغاء العملية لحماية قاعدة البيانات.")
+            return history
+            
+        day, month, year = date_match.group(1), date_match.group(2), date_match.group(3)
+        target_date = f"{year}-{month}-{day}" # تحويل آمن إلى الصيغة القياسية لترتيب الـ JSON (YYYY-MM-DD)
 
-        # 3. شرط الأمان الصارم لمنع التكرار وتدمير البيانات:
-        # إذا كان التاريخ الحقيقي مستخرجاً ومخزناً مسبقاً بهيكلية الكائن الصحيحة، يتوقف الكاشط فوراً.
+        # 2. شرط الأمان الصارم لمنع تكرار البيانات أو حجز أيام الإجازات
         if target_date in history and isinstance(history[target_date], dict) and "تاسي" in history[target_date]:
-            print(f"بيانات التاريخ الحقيقي {target_date} مسجلة مسبقاً وبنيتها سليمة. تم إنهاء العملية بأمان منعاً للتكرار.")
+            print(f"البيانات الخاصة بالتاريخ الحقيقي {target_date} متواجدة مسبقاً. تم إيقاف الكشط تلقائياً.")
             return history
 
-        # 4. بدء كشط وتحليل الجدول في حال كان التاريخ جديداً
+        # 3. تحليل الجدول في حال كان التاريخ جديداً تماماً صدر لأول مرة
         soup = BeautifulSoup(response.text, 'html.parser')
         rows = soup.find_all('tr')
         
@@ -67,38 +62,31 @@ def fetch_and_save_data():
                     name = cols[1].text.strip()
                     vol_text = cols[3].text.strip().replace(',', '')
                     
-                    if vol_text.isdigit():
+                    if vol_text.isdigit() and code.isdigit():
                         vol_val = int(vol_text)
-                        
-                        # نتحقق أن الرمز عبارة عن رقم (أي شركة مدرجة وليس عنواناً أو سطراً شكلياً)
-                        if code.isdigit():
-                            day_data[code] = {
-                                "name": name,
-                                "volume": vol_val
-                            }
-                            total_volume += vol_val
-                            found_any_data = True
+                        day_data[code] = {
+                            "name": name,
+                            "volume": vol_val
+                        }
+                        total_volume += vol_val
+                        found_any_data = True
                 except Exception:
                     continue
         
-        # 5. حفظ إجمالي السوق تحت مفتاح مخصص وتخزين اليوم
+        # 4. الحفظ النهائي المنظم
         if found_any_data and total_volume > 0:
-            # إضافة كائن إجمالي السوق "تاسي" في بداية أو نهاية قائمة الشركات لليوم
             day_data["تاسي"] = {
                 "name": "كامل السوق - تاسي",
                 "volume": total_volume
             }
-            
-            # ربط تفاصيل اليوم بالتاريخ الحقيقي المستخرج من الصفحة
             history[target_date] = day_data
             
-            # حفظ الملف بصيغة JSON منظمة وتدعم اللغة العربية
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
                 json.dump(history, f, ensure_ascii=False, indent=4)
-                print(f"تم بنجاح تحديث قاعدة البيانات وإدراج يوم جديد: {target_date}")
+                print(f"تم بنجاح تسجيل يوم مالي جديد وحقيقي: {target_date}")
                 
     except Exception as e:
-        print(f"حدث خطأ أثناء جلب البيانات أو تحليلها: {e}")
+        print(f"حدث خطأ أثناء معالجة البيانات: {e}")
         
     return history
 
@@ -125,22 +113,14 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        // استقبال البيانات القادمة من الباك إند
         const historyData = {{ data | tojson }};
-        
-        // فرز التواريخ تصاعدياً لضمان الترتيب الزمني الصحيح على المنحنى
         const labels = Object.keys(historyData).sort();
         
-        // 6. هندسة قراءة الرسم البياني ليتوافق مع بنية البيانات المتفرعة للشركات
         const dataValues = labels.map(date => {
             const entry = historyData[date];
-            
-            // إذا كان الكائن متفرعاً ويحتوي على مفتاح "تاسي"، استخرج منه الكمية الإجمالية
             if (entry && typeof entry === 'object' && entry["تاسي"]) {
                 return entry["تاسي"].volume;
             }
-            
-            // دعم توافقي مؤقت في حال وجود تواريخ قديمة مسجلة كأرقام مجردة
             return typeof entry === 'number' ? entry : 0;
         });
 
@@ -164,14 +144,8 @@ HTML_TEMPLATE = """
             options: {
                 responsive: true,
                 scales: {
-                    y: { 
-                        title: { display: true, text: 'الكمية (سهم)' } 
-                    },
-                    x: { 
-                        title: { display: true, text: 'التاريخ' },
-                        // 7. تفعيل الفراغ الشكلي التصميمي في أطراف المحور الأفقي لراحة العين دون تواريخ وهمية
-                        offset: true 
-                    }
+                    y: { title: { display: true, text: 'الكمية (سهم)' } },
+                    x: { title: { display: true, text: 'التاريخ' }, offset: true }
                 }
             }
         });

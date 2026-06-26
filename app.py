@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import re
 from datetime import datetime
 import pytz
 import requests
@@ -16,10 +17,6 @@ GITHUB_TOKEN = os.environ.get("GH_TOKEN")
 GITHUB_REPO = "roi-sa/sbl-indicator"
 DATA_FILE = "sbl_history.json"
 
-def get_saudi_date():
-    saudi_tz = pytz.timezone('Asia/Riyadh')
-    return str(datetime.now(saudi_tz).date())
-
 def get_github_file():
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DATA_FILE}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
@@ -33,7 +30,7 @@ def get_github_file():
     except Exception as e:
         return {}, None, str(e)
 
-def save_github_file(history_data, sha):
+def save_github_file(history_data, target_date, sha):
     if not GITHUB_TOKEN:
         return False, "missing_token"
     
@@ -47,7 +44,7 @@ def save_github_file(history_data, sha):
     content_b64 = base64.b64encode(content_bytes).decode('utf-8')
     
     payload = {
-        "message": f"automated-update-{get_saudi_date()}",
+        "message": f"automated-update-{target_date}",
         "content": content_b64,
         "branch": "main"
     }
@@ -69,16 +66,25 @@ def fetch_and_save_data():
     }
     
     history, sha, db_msg = get_github_file()
-    current_date = get_saudi_date()
     
     try:
         response = requests.get(url, headers=headers, verify=False, timeout=15)
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
-        rows = soup.find_all('tr')
         
+        # 1. استخراج تاريخ التقرير الفعلي المكتوب داخل الصفحة قسراً لربطه بالبيانات
+        page_text = soup.get_text()
+        date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})|(\d{2}[-/]\d{2}[-/]\d{4})', page_text)
+        
+        if date_match:
+            report_date = date_match.group(0).replace('/', '-')
+        else:
+            saudi_tz = pytz.timezone('Asia/Riyadh')
+            report_date = str(datetime.now(saudi_tz).date())
+        
+        rows = soup.find_all('tr')
         today_data = {"تاسي": {"name": "كامل السوق - تاسي", "volume": 0}}
-        found_any_data = False
+        companies_count = 0
         
         for row in rows:
             cols = row.find_all('td')
@@ -86,24 +92,36 @@ def fetch_and_save_data():
                 try:
                     sym_text = cols[0].text.strip()
                     name_text = cols[1].text.strip()
-                    vol_text = cols[3].text.strip().replace(',', '')
+                    vol_text = cols[3].text.strip().replace(',', '').replace(' ', '')
                     
                     if sym_text.isdigit() and vol_text.isdigit():
                         vol_val = int(vol_text)
-                        today_data[sym_text] = {"name": name_text, "volume": vol_val}
-                        today_data["تاسي"]["volume"] += vol_val
-                        found_any_data = True
+                        if vol_val > 0:
+                            today_data[sym_text] = {"name": name_text, "volume": vol_val}
+                            today_data["تاسي"]["volume"] += vol_val
+                            companies_count += 1
                 except Exception:
                     continue
         
-        if found_any_data and today_data["تاسي"]["volume"] > 0:
-            history[current_date] = today_data
-            success, save_msg = save_github_file(history, sha)
-            return history, f"تم التحديث بنجاح | {save_msg}"
+        # إذا وجدنا كميات حقيقية نعتمد التحديث بالتاريخ الفعلي للتقرير
+        if companies_count > 0 and today_data["تاسي"]["volume"] > 0:
+            history[report_date] = today_data
+            success, save_msg = save_github_file(history, report_date, sha)
+            return history, f"تمت قراءة وتحديث التقرير الفعلي لتاريخ {report_date} بنجاح (الشركات: {companies_count} | الكمية: {today_data['تاسي']['volume']:,})"
         else:
-            return history, "عرض البيانات التاريخية الجاهزة (السوق مغلق أو لا بيانات جديدة)"
+            # محاولة قراءة كمية السوق العام إذا كان هيكل الصفحة مختلفاً (صيانة للمستقبل)
+            full_text = soup.get_text().replace(',', '')
+            totals = [int(s) for s in re.findall(r'\b\d{6,12}\b', full_text)]
+            if totals and today_data["تاسي"]["volume"] == 0:
+                today_data["تاسي"]["volume"] = max(totals)
+                history[report_date] = today_data
+                save_github_file(history, report_date, sha)
+                return history, f"تم تحديث إجمالي تاسي التقريبي لتاريخ {report_date} (الكمية: {today_data['تاسي']['volume']:,})"
+            
+            return history, f"تم عرض قاعدة البيانات التاريخية بنجاح | تاريخ آخر تحديث بالملف هو: {max(history.keys()) if history else 'لا يوجد'}"
+            
     except Exception as e:
-        return history, f"عرض البيانات التاريخية الجاهزة | خطأ جلب حية: {str(e)}"
+        return history, f"تم عرض البيانات التاريخية بأمان | خطأ اتصال: {str(e)}"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -116,7 +134,7 @@ HTML_TEMPLATE = """
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 30px; background-color: #f4f7f6; color: #333; }
         .container { max-width: 1000px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
         h1 { color: #2c3e50; text-align: center; font-size: 22px; margin-bottom: 5px; }
-        .status-bar { text-align: center; color: #7f8c8d; font-size: 13px; margin-bottom: 25px; }
+        .status-bar { text-align: center; color: #27ae60; font-size: 14px; font-weight: bold; margin-bottom: 25px; }
         .control-panel { background: #ecf0f1; padding: 15px; border-radius: 8px; display: flex; gap: 15px; align-items: center; justify-content: center; flex-wrap: wrap; margin-bottom: 25px; }
         .search-group, .select-group { display: flex; align-items: center; gap: 8px; }
         select, input { padding: 8px 12px; border: 1px solid #bdc3c7; border-radius: 5px; font-size: 14px; }
@@ -189,7 +207,16 @@ HTML_TEMPLATE = """
             labels.forEach(date => {
                 if (rawHistory[date] && rawHistory[date][symbol] !== undefined) {
                     chartLabels.push(date);
-                    chartDataValues.push(rawHistory[date][symbol].volume);
+                    
+                    let origVolume = rawHistory[date][symbol].volume;
+                    let cleanVolume = 0;
+                    
+                    if (origVolume !== undefined && origVolume !== null) {
+                        let volString = origVolume.toString().replace(/,/g, '');
+                        cleanVolume = parseInt(volString, 10) || 0;
+                    }
+                    
+                    chartDataValues.push(cleanVolume);
                 }
             });
 

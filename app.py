@@ -12,7 +12,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
-# الإعدادات المعتمدة
+# الإعدادات
 GITHUB_TOKEN = os.environ.get("GH_TOKEN")
 GITHUB_REPO = "roi-sa/sbl-indicator"
 DATA_FILE = "sbl_history.json"
@@ -102,12 +102,48 @@ def fetch_and_save_data():
         
     return history, status_msg
 
-# بقية الكود (التصميم والواجهة)
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>مؤشر الأسهم المقرضة</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div style="text-align:center; padding: 20px;">
+        <h1>بيانات الأسهم المقرضة</h1>
+        <p style="color: #555;">{{ status_message }}</p>
+        <canvas id="sblChart" width="400" height="150"></canvas>
+    </div>
+    <script>
+        const rawHistory = {{ history_data | tojson }};
+        const ctx = document.getElementById('sblChart').getContext('2d');
+        const labels = Object.keys(rawHistory).sort();
+        const tasiData = labels.map(date => rawHistory[date]["تاسي"] ? rawHistory[date]["تاسي"].volume : 0);
+        
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'حركة تاسي - الأسهم المقرضة',
+                    data: tasiData,
+                    borderColor: '#2980b9',
+                    fill: true,
+                    tension: 0.1
+                }]
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
 @app.route('/')
 def index():
     chart_data, status_msg = fetch_and_save_data()
-    # هنا يمكنك إكمال الـ HTML_TEMPLATE الذي كنا نستخدمه
-    return f"<h1>النظام يعمل</h1><p>{status_msg}</p>"
+    return render_template_string(HTML_TEMPLATE, history_data=chart_data, status_message=status_msg)
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
